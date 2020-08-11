@@ -1,0 +1,509 @@
+---
+title: "Mesa City Traffic Arrest Violation Prediction"
+author: "Shashank Sanjee Venkata Chalapathi"
+date: "11/08/2020"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Required Packages 
+
+```{r ,warning=FALSE,message=FALSE}
+
+library(readr)
+library(plotly)
+library(tidyverse)
+library(lubridate)
+library(MASS)
+library(mice)
+library(ROSE)
+library(caret)
+library(randomForest)
+library(e1071)
+library(partykit)
+library(nnet)
+library(revgeo)
+library(opencage)
+library(rgeos)
+library(ggforce)
+library(ggplot2)
+library(ggmap)
+library(DT)
+library(viridis)
+library(rpart.plot)
+library(patchwork)
+
+```
+
+### Reading data and cleaning
+
+```{r,warning=FALSE,message=FALSE}
+
+az_me <- read_csv("az_mesa_2019_12_17.csv")
+population<-read_csv("Population.csv")
+zipcode<-read_csv("zipcode.csv")
+az_me <- az_me[,c("date","time","subject_age","subject_race","subject_sex","violation","arrest_made","lng","lat","type")]
+az_me<- az_me %>% filter( type=="vehicular" & subject_race !="unknown" )
+
+az_me<-na.omit(az_me)
+```
+
+## Preliminary Data Analysis
+
+
+### Trend for stopping accross mesa 
+
+```{r ,warning=FALSE,message=FALSE}
+graph<-az_me %>%
+  group_by(Year=year(date),subject_race)%>%count() 
+graph <- inner_join(graph,population,by=c('Year','subject_race')) 
+
+graph<-graph %>% mutate(percentage=n*100/Total)
+
+g1<-ggplot(graph, aes(
+  x = Year,
+  y = n,
+  col= subject_race
+  )) +
+  geom_line() +
+  geom_point() +
+  xlab("Year") +
+  ylab("Total Number of cases") +
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))
+g2<-ggplot(graph, aes(
+  x = Year,
+  y = percentage,
+  col= subject_race
+  )) +
+  geom_line() +
+  geom_point() +
+  xlab("Year") +
+  ylab("Percentage of population by race") +
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))
+
+combined <- g1 + g2 & theme(legend.position = "right") 
+combined + plot_layout(guides = "collect")
+
+```
+
+### Trend for arresting accross mesa
+
+```{r,warning=FALSE,message=FALSE}
+graph<-az_me %>% filter(arrest_made==TRUE) %>%
+  group_by(Year=year(date),subject_race)%>%count() 
+graph <- inner_join(graph,population,by=c('Year','subject_race')) 
+
+graph<-graph %>% mutate(percentage=n*100/Total)
+
+g1<-ggplot(graph, aes(
+  x = Year,
+  y = n,
+  col= subject_race
+  )) +
+  geom_line() +
+  geom_point() +
+  xlab("Year") +
+  ylab("Total Number of cases") +
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))
+g2<-ggplot(graph, aes(
+  x = Year,
+  y = percentage,
+  col= subject_race
+  )) +
+  geom_line() +
+  geom_point() +
+  xlab("Year") +
+  ylab("Percentage of population by race") +
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))
+
+combined <- g1 + g2 & theme(legend.position = "right") 
+combined + plot_layout(guides = "collect")
+```
+
+
+### Total number of cases: Hour-wise
+
+```{r ,warning=FALSE,message=FALSE}
+az_me_age <- az_me %>%
+mutate(age_level=cut(az_me$subject_age, breaks =c(15,30,50,81), labels=c('15-30','30-50','>50')))
+az_me_age$subject_race=ifelse(az_me_age$subject_race=='unknown',NA,az_me_age$subject_race)
+az_me_age<-na.omit(az_me_age)
+
+graph_time<-az_me_age %>%
+  group_by(hour=as.factor(hour(time)),age_level)%>%count()
+
+g2<-ggplot(na.omit(graph_time), aes(
+  x = hour,
+  y = n,
+  fill= age_level
+  )) +
+  geom_col() +
+  xlab("Hour") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))+
+  scale_fill_brewer(palette = "Dark2") 
+ggplotly(g2)
+```
+
+### Total number of cases: Day - Wise
+
+```{r ,warning=FALSE,message=FALSE}
+graph_day<-az_me_age %>%
+  group_by(day=as.factor(weekdays(as.Date(date))),age_level)%>%count()
+# graph_day$subject_race <- fct_relevel(as.factor(graph_day$subject_race),'white',after=0L)
+
+g3<-ggplot(graph_day, aes(
+  x = reorder(day,n),
+  y = n,
+  fill= age_level
+  )) +
+  geom_col(width = 0.5) +
+  xlab("Days") +
+  ylab("Count")+
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))+
+  scale_fill_brewer(palette = "Dark2") 
+ggplotly(g3)
+```
+
+### Total number of vehicles stopped vs Reason for being stopped
+
+```{r,,warning=FALSE,message=FALSE}
+
+
+violation<-az_me%>%filter(type=="vehicular") %>% group_by(violation)%>%summarise(count=n())
+violation <- na.omit(violation)
+violation<-violation[order(violation$count,decreasing = TRUE),]
+
+df3<-az_me_age %>%
+  filter(type=="vehicular") %>%
+      group_by(violation,age_level) %>%
+      summarise(count=n())%>%
+      arrange(desc(count))
+    
+    df3<-na.omit(df3)
+    df3$violation<-as.factor(df3$violation)
+    df4<-df3[1:15,]
+    g4<-ggplot(data=df4, aes(x=reorder(violation,age_level),y=count,fill=age_level)) +
+      geom_bar(stat = "identity",position = "dodge") +
+      coord_flip()+ 
+      xlab("Reason for being stopped") +
+      ylab("Total number of vehicles stopped")
+      
+ ggplotly(g4)
+```
+
+
+## Model fitting using caret package
+
+
+
+#### Selecting only arrest data 
+```{r}
+
+az_me_age_model<-az_me %>% filter( arrest_made == TRUE)
+
+```
+
+
+#### Imputing zipcode which is generated from latitude and longitude values which will be a predictor for my model
+```{r,warning=FALSE,message=FALSE}
+# Code for generating zipcode is commented because it gets stuck while knitting the file. so I have written the file to directory and read in to this rmd separately
+# x<-revgeo(az_me_age_model$lng, az_me_age_model$lat,output = "frame")$zip
+# y<-str_replace(x, ".*\\b(\\d{5})\\b.*", "\\1")
+# write.csv(y,"~/Project/zipcode.csv", row.names = FALSE)
+az_me_age_model$zipcode<-zipcode$x
+az_me_age_model[az_me_age_model$zipcode=="Postcode Not Found",]$zipcode=NA
+az_me_age_model<-na.omit(az_me_age_model)
+```
+
+### Dividing violations in 5 broad categories which act as response for my model
+```{r,warning=FALSE,message=FALSE}
+
+az_me_age_model$viotype <-
+  ifelse(
+    grepl("DRUGS|LIQUOR|PHONE", az_me_age_model$violation),
+    "distracted_driving",
+       ifelse(
+        grepl("DEVICE|LIGHT|STOP|LIGHTS|LAMPS", az_me_age_model$violation),
+        "running_red_light_or_without_headlight",
+        ifelse(
+          grepl(
+            "TURN|SPEED|MPH|FOLLOWING|AGGRESSIVE |POLICE|DRIVEWAY|JAYWALKING|PEDESTRIAN|RECKLESS|SIDEWALK|PSS|LEFT|RIGHT|SIGNAL|LANE|UNSAFE|EMERGENCY",
+            az_me_age_model$violation
+          ),
+          "reckless_driving",
+          ifelse(
+            grepl(
+              "ACCIDENT|QUICK|UNATT|INFO|REPORT|DAMAGE|RELEASE",
+              az_me_age_model$violation
+            ),
+            "leaving_scene_of_an_accident_informing",
+            "without_proper_documents_or_vehicle_defects"
+          )
+        )
+      )
+    )
+  
+  
+az_me_age_model<-az_me_age_model %>%
+  mutate(subject_race=as.factor(subject_race),
+         subject_sex=as.factor(subject_sex),
+         viotype=as.factor(viotype),
+         zipcode=as.factor(zipcode))
+
+```
+
+## Types of Models fitted
+
+### Multinomial Model 
+
+```{r,warning=FALSE,message=FALSE,results="hide"}
+model<- viotype~subject_age+subject_race+subject_sex+zipcode
+
+#Multinomial model with up sampling
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     sampling = "up")
+
+set.seed(42)
+model_rf_over <- caret::train(model,
+                              data = az_me_age_model,
+                              method = "multinom",
+                              preProcess = c("scale", "center"),
+                              trControl = ctrl,
+                              tuneLength = 5)
+```
+
+
+
+```{r,,message=FALSE,warning=FALSE}
+x<-predict(model_rf_over, newdata = az_me_age_model, type = "raw")
+result<- confusionMatrix(x,az_me_age_model$viotype)
+result
+
+#For combinig the Recall Precision to calculate F1 score
+get.macro.f1 <- function(cm) {
+    c <- cm$byClass # a single matrix is sufficient
+    re <- sum(c[, "Recall"]) / nrow(c)
+    pr <- sum(c[, "Precision"]) / nrow(c)
+    f1 <- 2 * ((re * pr) / (re + pr))
+    ac<-cm$overall["Accuracy"]
+    f2<-c(ac,re,pr,f1)
+    return(f2)
+}
+macro.mul <- get.macro.f1(result)
+
+```
+
+### Decision tree 
+```{r,warning=FALSE,message=FALSE}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 3,
+                     sampling = "up")
+
+set.seed(42)
+model_rf_over <- caret::train(model,
+                              data = az_me_age_model,
+                              method = "rpart",
+                              parms = list(split = "information"),
+                              tuneLength = 10,
+                              trControl = ctrl)
+
+x<-predict(model_rf_over, newdata = az_me_age_model, type = "raw")
+result<-confusionMatrix(x,az_me_age_model$viotype)
+result
+get.macro.f1 <- function(cm) {
+    c <- cm$byClass # a single matrix is sufficient
+    re <- sum(c[, "Recall"]) / nrow(c)
+    pr <- sum(c[, "Precision"]) / nrow(c)
+    f1 <- 2 * ((re * pr) / (re + pr))
+    ac<-cm$overall["Accuracy"]
+    f2<-c(ac,re,pr,f1)
+    return(f2)
+}
+macro.dt <- get.macro.f1(result)
+```
+
+### Random Forest 
+```{r,warning=FALSE,message=FALSE}
+ctrl <- trainControl(method = "oob", 
+                     number = 10,
+                     sampling = "up")
+
+set.seed(42)
+model_rf_over_rf <- caret::train(model,
+                              data = az_me_age_model,
+                              method = "rf",
+                              trControl = ctrl)
+
+
+x<-predict(model_rf_over_rf, newdata = az_me_age_model, type = "raw")
+result<-confusionMatrix(x,az_me_age_model$viotype)
+result
+
+get.macro.f1 <- function(cm) {
+    c <- cm$byClass # a single matrix is sufficient
+    re <- sum(c[, "Recall"]) / nrow(c)
+    pr <- sum(c[, "Precision"]) / nrow(c)
+    f1 <- 2 * ((re * pr) / (re + pr))
+    ac<-cm$overall["Accuracy"]
+    f2<-c(ac,re,pr,f1)
+    return(f2)
+}
+macro.rand <- get.macro.f1(result)
+```
+
+
+### Neural Net 
+```{r,message=FALSE,warning=FALSE,results="hide"}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10, 
+                     verboseIter = FALSE,
+                     sampling = "up")
+
+set.seed(42)
+model_rf_over <- caret::train(model,
+                              data = az_me_age_model,
+                              method = "nnet",
+                              maxit = 1000,
+                              trControl = ctrl)
+
+```
+
+```{r,,message=FALSE,warning=FALSE}
+x<-predict(model_rf_over, newdata = az_me_age_model, type = "raw")
+result<-confusionMatrix(x,az_me_age_model$viotype)
+result
+get.macro.f1 <- function(cm) {
+    c <- cm$byClass # a single matrix is sufficient
+    re <- sum(c[, "Recall"]) / nrow(c)
+    pr <- sum(c[, "Precision"]) / nrow(c)
+    f1 <- 2 * ((re * pr) / (re + pr))
+    ac<-cm$overall["Accuracy"]
+    f2<-c(ac,re,pr,f1)
+    return(f2)
+}
+macro.nn <- get.macro.f1(result)
+
+```
+
+
+### Knn  
+```{r,message=FALSE,warning=FALSE}
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 3,
+                     sampling = "up")
+
+set.seed(42)
+model_rf_over <- caret::train(model,
+                              data = az_me_age_model,
+                              method = "knn",
+                              preProcess = c("scale", "center"),
+                              tuneLength = 20,
+                              trControl = ctrl)
+
+x<-predict(model_rf_over, newdata = az_me_age_model, type = "raw")
+result<-confusionMatrix(x,az_me_age_model$viotype)
+result
+get.macro.f1 <- function(cm) {
+    c <- cm$byClass # a single matrix is sufficient
+    re <- sum(c[, "Recall"]) / nrow(c)
+    pr <- sum(c[, "Precision"]) / nrow(c)
+    f1 <- 2 * ((re * pr) / (re + pr))
+    ac<-cm$overall["Accuracy"]
+    f2<-c(ac,re,pr,f1)
+    return(f2)
+}
+macro.knn <- get.macro.f1(result)
+rbind(macro.mul,macro.dt,macro.rand,macro.nn,macro.knn)
+
+```
+
+
+## Map visualizations
+
+### Model Output with max probability violation 
+```{r,warning=FALSE,message=FALSE}
+#Importing map for mesa city
+register_google(key = "AIzaSyCvgTagZzhtN_1FiBYEQy29kgkSYgxEAao", write = TRUE)
+mesa <- ggmap(get_map(c(left=-111.9363,bottom=33.27729,right=-111.5822,top=33.49722)))
+
+#Predicted probability percentages for getting arrested for different  violation types at different locations.
+x<-predict(model_rf_over_rf, newdata = az_me_age_model, type = "prob")
+
+
+#combining predicted values with original data set.
+n<-nrow(x)
+x$obs<-1:n
+x_long <- x %>% pivot_longer(-obs,
+                       names_to = "violation_type",
+                       values_to = "prob")
+x_max <- x_long %>%
+            group_by(obs) %>%
+              summarise(max_prob = max(prob),
+                        violation_type = violation_type[which(prob == max_prob)])
+
+
+az_me_age_model$obs<-c(1:n)
+az_me_age_model<-inner_join(az_me_age_model,x_max,by="obs")
+az_me_age_model_shiny<-inner_join(az_me_age_model,x_long,by="obs")
+
+az_me_age_model <- az_me_age_model %>%
+  arrange(obs) %>%
+  mutate( violation_type=factor(violation_type, unique(violation_type))) %>%
+  mutate( mytext=paste(
+    "Violation Type: ", violation_type, "\n", 
+    "Percentage of getting arrested for this violation: ", formatC(max_prob*100), sep="")
+  )
+
+shiny_data<- az_me_age_model_shiny %>% group_by(violation_type.y,subject_race,subject_sex) %>% distinct()
+shiny_data$violation_type<- as.factor(shiny_data$violation_type.y)
+shiny_data<-shiny_data[,c("subject_age","subject_race","subject_sex","lng","lat","violation_type","prob")]
+shiny_data<-unique(shiny_data)
+write.csv(shiny_data,"~/shiny_data.csv", row.names = FALSE)
+
+# Make the map (static)
+p <- mesa +
+  geom_point(
+    aes(
+      x = lng,
+      y = lat,
+      text = mytext,
+      color =violation_type
+    ),
+    data = az_me_age_model
+  ) +
+  theme_void() +
+  ggtitle("Probability of arrest violation types across the MESA(AZ state)")+
+  theme_bw() + theme(axis.title.x=element_blank(),
+                     axis.title.y=element_blank(),
+                     panel.border = element_blank())
+
+p <- ggplotly(p,tooltip = "text")
+p
+```
+
+### Heat map for number of arrests which are predicted from the model
+
+```{r,message=FALSE,warning=FALSE}
+az_me_age_model$lon<-az_me_age_model$lng
+mesa +
+  coord_equal() + 
+  xlab('Longitude') + 
+  ylab('Latitude') + 
+  stat_density2d(aes(fill = ..level..), alpha = .3,
+                 geom = "polygon", data = az_me_age_model,show.legend=TRUE) + 
+  scale_fill_viridis_c() + 
+  theme(axis.line=element_blank(),axis.text.x=element_blank(),
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank())+ labs(fill = "Number of Arrest Cases")+
+  facet_wrap(~violation_type)
+
+```

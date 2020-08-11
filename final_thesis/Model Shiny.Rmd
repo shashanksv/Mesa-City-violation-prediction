@@ -1,0 +1,97 @@
+---
+title: "Mesa City Traffic Arrest Violation Prediction"
+author: "Shashank Sanjee Venkata Chalapathi"
+date: "11/08/2020"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,echo=F,warning=F,message=F, eval=T}
+library(tidyverse)
+library(ggmap)
+library(shiny)
+library(ggplot2)
+library(leaflet)
+library(readr)
+library(viridis)
+library(rsconnect)
+
+rsconnect::setAccountInfo(name='shashanksv', token='D35842D957D06925687CD85C46AFE987', secret='WKfa1YbaLaF88q/cyUx4P8kid6lquJWuSzOGXlNZ')
+
+shiny_data <- read_csv("shiny_data.csv")
+
+
+
+```
+
+```{r,shiny_data, echo=FALSE, size=100}
+
+
+vio<-unique(shiny_data$violation_type)
+age<-unique(shiny_data$subject_age)
+race<-unique(shiny_data$subject_race)
+sex<-unique(shiny_data$subject_sex)
+ui <- fluidPage(
+  sidebarLayout(
+  sidebarPanel(
+  selectInput("Violation_Type", label = "Violation_Type",
+             choices =vio, selected =vio[1]),
+  selectInput("People_Race", label = "People_Race",
+             choices =race, selected =race[1]),
+  selectInput("People_Sex", label = "People_Sex",
+             choices =sex, selected =sex[1]),
+   h4("These plots show us that the percentage of different arrest violation type  at different locations based on people race, sex.")
+  ),
+  mainPanel( 
+    leafletOutput("bbmap")
+  )
+  )
+  )
+  
+
+
+server <- function(input, output, session) {
+   
+  shiny_data$popup <-
+    paste(
+      "<br>",
+      "<b>Violation type: </b>",
+      shiny_data$violation_type,
+      "<br>",
+      "<b>Percentage: </b>",
+      shiny_data$prob*100
+    )
+   pal <- colorNumeric(
+  palette = "Spectral",
+  domain = shiny_data$prob)
+  
+  output$bbmap <- renderLeaflet({
+    shiny_data1 <-
+      shiny_data %>% filter(
+        violation_type == input$Violation_Type,
+        subject_race == input$People_Race,
+        subject_sex == input$People_Sex
+      )
+    
+      leaflet(shiny_data1) %>% 
+      addCircles(lng = ~lng, lat = ~lat) %>% 
+      addTiles() %>%
+      addCircleMarkers(data = shiny_data1, lat =  ~lat, lng = ~lng, 
+                       radius = 7, popup = ~as.character(popup), 
+                       color = ~pal(shiny_data1$prob),
+                       stroke = FALSE, fillOpacity = 0.8)%>%
+      addEasyButton(easyButton(
+        icon="fa-crosshairs", title="ME",
+        onClick=JS("function(btn, map){ map.locate({setView: true}); }")))
+        })
+  
+}
+shinyApp(ui, server,
+  options = list(height = 600))
+
+
+```
